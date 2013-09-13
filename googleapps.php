@@ -18,7 +18,6 @@
  +--------------------------------------------------------------------------+
 */
 require_once 'googleapps.civix.php';
-require_once 'cividesk.ext.php';
 
 /**
  * Implementation of hook_civicrm_config
@@ -47,33 +46,7 @@ function googleapps_civicrm_xmlMenu(&$files) {
  * Implementation of hook_civicrm_install
  */
 function googleapps_civicrm_install() {
-  // required to define the CONST below
   googleapps_civicrm_config(CRM_Core_Config::singleton());
-  require_once 'CRM/Sync/BAO/GoogleApps.php';
-  // Create sync queue table if not exists
-  $query = "
-    CREATE TABLE IF NOT EXISTS `" . CRM_Sync_BAO_GoogleApps::GOOGLEAPPS_QUEUE_TABLE_NAME . "` (
-          `id` int(10) NOT NULL AUTO_INCREMENT,
-          `civicrm_contact_id` int(10) NOT NULL,
-          `google_contact_id` varchar(32) DEFAULT NULL,
-          `first_name` varchar(64) CHARACTER SET utf8 COLLATE utf8_unicode_ci DEFAULT NULL,
-          `last_name` varchar(64) CHARACTER SET utf8 COLLATE utf8_unicode_ci DEFAULT NULL,
-          `organization` varchar(64) CHARACTER SET utf8 COLLATE utf8_unicode_ci DEFAULT NULL,
-          `job_title` varchar(255) CHARACTER SET utf8 COLLATE utf8_unicode_ci DEFAULT NULL,
-          `email` varchar(64) CHARACTER SET utf8 COLLATE utf8_unicode_ci DEFAULT NULL,
-          `email_location_id` int(10) UNSIGNED DEFAULT NULL,
-          `email_is_primary` tinyint(4) DEFAULT '0',
-          `phone` varchar(32) CHARACTER SET utf8 COLLATE utf8_unicode_ci DEFAULT NULL,
-          `phone_ext` varchar(32) CHARACTER SET utf8 COLLATE utf8_unicode_ci DEFAULT NULL,
-          `phone_type_id` int(10) UNSIGNED DEFAULT NULL,
-          `phone_location_id` int(10) UNSIGNED DEFAULT NULL,
-          `phone_is_primary` tinyint(4) DEFAULT '0',
-          `is_deleted` tinyint(1) NOT NULL DEFAULT '0',
-      PRIMARY KEY (`id`),
-      KEY `civicrm_contact_id` (`civicrm_contact_id`),
-      KEY `google_contact_id` (`google_contact_id`)
-    ) ENGINE=InnoDB  DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci";
-  CRM_Core_DAO::executeQuery($query);
   return _googleapps_civix_civicrm_install();
 }
 
@@ -96,11 +69,9 @@ function googleapps_civicrm_uninstall() {
   }
   $params = array('version' => 3, 'id' => $custom_group['id']);
   $result = civicrm_api('CustomGroup', 'delete', $params);
-  // Drop sync queue table
-  $query = "DROP TABLE IF EXISTS `" . CRM_Sync_BAO_GoogleApps::GOOGLEAPPS_QUEUE_TABLE_NAME . "`;";
   CRM_Core_DAO::executeQuery($query);
   // Delete all settings
-  CRM_Core_BAO_Setting::deleteItem(CRM_Sync_BAO_GoogleApps::GOOGLEAPPS_PREFERENCES_NAME);
+//   CRM_Core_BAO_Setting::deleteItem(CRM_Sync_BAO_GoogleApps::GOOGLEAPPS_PREFERENCES_NAME);
   return _googleapps_civix_civicrm_uninstall();
 }
 
@@ -132,7 +103,7 @@ function googleapps_civicrm_disable() {
   $params = CRM_Sync_BAO_GoogleApps::get_customGroup();
   $params['version'] = 3;
   $params['is_active'] = 0;
-  $result = civicrm_api('CustomGroup', 'create', $params);
+  $result = civicrm_api('CustomGroup', 'delete', $params);
   return _googleapps_civix_civicrm_disable();
 }
 
@@ -164,42 +135,24 @@ function googleapps_civicrm_managed(&$entities) {
  */
 function googleapps_civicrm_navigationMenu( &$params ) {
   googleapps_civicrm_config(CRM_Core_Config::singleton());
-  // Add menu entry for extension administration page
-  _cividesk_insert_navigationMenu($params, 'Administer/System Settings', array(
-    'name'       => 'Cividesk sync for Google Apps',
-    'url'        => 'civicrm/admin/sync/googleapps',
-    'permission' => 'administer CiviCRM',
-  ));
 
-  // Do we need to add Google Apps navigation menu?
-  $settings = CRM_Sync_BAO_GoogleApps::getSettings();
-  if (CRM_Utils_Array::value('domain', $settings)) {
-    // Add menu entry for More submenu
-    $ok = _cividesk_insert_navigationMenu($params, '', array(
-      'name'       => 'More',
-    ));
-    // And then all childs
-    if ($ok) {
-      _cividesk_insert_navigationMenu($params, 'More', array(
-        'name'      => 'Google Mail',
-        'url'       => 'http://mail.google.com/a/'.$settings['domain'],
-        'target'    => 'gmail',
-      ));
-      _cividesk_insert_navigationMenu($params, 'More', array(
-        'name'      => 'Google Calendar',
-        'url'       => 'http://www.google.com/calendar/hosted/'.$settings['domain'],
-        'target'    => 'gcalendar',
-      ));
-      _cividesk_insert_navigationMenu($params, 'More', array(
-        'name'      => 'Google Docs',
-        'url'       => 'http://docs.google.com/a/'.$settings['domain'],
-        'target'    => 'gdocs',
-      ));
-      _cividesk_insert_navigationMenu($params, 'More', array(
-        'name'      => 'Google Contacts',
-        'url'       => 'http://www.google.com/contacts/a/'.$settings['domain'],
-        'target'    => 'gcontacts',
-      ));
-    }
-  }
+  // get the id of Administer Menu
+  $administerMenuId = CRM_Core_DAO::getFieldValue('CRM_Core_BAO_Navigation', 'Administer', 'id', 'name');
+  $sysSettingsMenuId = CRM_Core_DAO::getFieldValue('CRM_Core_BAO_Navigation', 'System Settings', 'id', 'name');
+  
+  // skip adding menu if there is no administer menu
+  if ($sysSettingsMenuId) {
+    // get the maximum key under adminster menu
+    $maxKey = max( array_keys($params[$administerMenuId]['child'][$sysSettingsMenuId]['child']));
+    $params[$administerMenuId]['child'][$sysSettingsMenuId]['child'][$maxKey+1] =  array (
+      'attributes' => array(
+          'label' => 'CiviCRM sync for Google Apps',
+          'url' => 'civicrm/admin/sync/googleapps',
+          'permission' => 'administer CiviCRM',
+          'parentID' => $sysSettingsMenuId,
+          'navID' => $maxKey + 1,
+          'active' => 1,
+      )
+    );
+  }  
 }

@@ -28,10 +28,7 @@
 </ul>
 {/htxt}
 
-{htxt id="register"}
-<p>{ts}This option will send your registration information to Cividesk. Registering is important since it allows us to judge the level of interest for the developments we are producing, and hence plan for improvements or new developments accordingly.{/ts}</p>
-{/htxt}
-
-{htxt id="subscribe"}
-<p>{ts}This option will subscribe your email address to a low-traffic mailing list informing you of updates and improvements to Cividesk-produced extensions. You can of course unsubscribe at anytime.{/ts}</p>
+{htxt id="group"}
+<p>{ts}Choose the CiviCRM <strong>smart</strong> group that you want to sync the contacts for. You can create a
+smart group by doing an advanced search and then saving the result as a group.{/ts}</p>
 {/htxt}

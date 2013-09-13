@@ -144,7 +144,7 @@ function _googleapps_civix_civicrm_managed(&$entities) {
     $es = include $file;
     foreach ($es as $e) {
       if (empty($e['module'])) {
-        $e['module'] = 'com.cividesk.sync.googleapps';
+        $e['module'] = 'org.civicrm.sync.googleapps';
       }
       $entities[] = $e;
     }

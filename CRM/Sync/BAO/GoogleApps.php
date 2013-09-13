@@ -19,7 +19,6 @@
 */
 
 class CRM_Sync_BAO_GoogleApps {
-  CONST GOOGLEAPPS_QUEUE_TABLE_NAME = 'cividesk_sync_googleapps';
   CONST GOOGLEAPPS_PREFERENCES_NAME = 'Google Apps Sync Preferences';
 
   /**
@@ -118,7 +117,7 @@ class CRM_Sync_BAO_GoogleApps {
         return civicrm_api3_create_error( 'Could not create the custom fields set' );
       $params = reset($result['values']);
       $params['version'] = 3;
-      $params['title'] = 'Cividesk sync for Google Apps';
+      $params['title'] = 'CiviCRM sync for Google Apps';
       $result = civicrm_api('CustomGroup', 'create', $params);
     }
     return reset($result['values']);
@@ -182,7 +181,7 @@ class CRM_Sync_BAO_GoogleApps {
     $dao->api_entity = 'Job';
     $dao->api_action = 'googleapps_sync';
     if (!$dao->find(true)) {
-      $dao->name = 'Cividesk sync for Google Apps';
+      $dao->name = 'CiviCRM sync for Google Apps';
       $dao->description = 'Synchronizes CiviCRM contacts with the Google Apps Contacts Directory. You can adjust the \'max_processed\' parameter to control how many contacts are processed each run (default: 50).';
       $dao->run_frequency = 'Always';
       $dao->is_active = 1;
@@ -208,7 +207,29 @@ class CRM_Sync_BAO_GoogleApps {
     $this->_scope = $scope;
   }
 
-  function call($object, $op, $params = array()) {
+  function call($object, $op, $contact_id) {
+    $apiParams = array(
+        'version' => 3,
+        'sequential' => 1,
+        'contact_id' => $contact_id,
+    );
+    $contactResult = civicrm_api('Contact', 'get', $apiParams);
+    if ($contactResult['is_error'] || $contactResult['count'] == 0) {
+      throw new Exception('Unable to load Contact record for id ' . $contact_id);
+    }
+    $contact = $contactResult['values'][0];
+    
+    $apiParams = array(
+        'version' => 3,
+        'entity_id' => $contact['id'],
+        'return.custom_'.$this->_custom_fields['google_id']['id'] => 1
+    );
+    $customResult = civicrm_api('CustomValue', 'get', $apiParams);
+    if (!$contactResult['is_error'] && $contactResult['count'] > 0) {
+      $google_contact_id = CRM_Utils_Array::value('latest', array_values($customResult['values'])[0]);
+      $contact['google_contact_id'] = $google_contact_id;
+    }
+    
     // Check authentication and scope
     if (empty($this->_handle) || empty($this->_scope)) {
       throw new Exception('You need to initialize the scope before calling Google Apps.');
@@ -230,7 +251,12 @@ class CRM_Sync_BAO_GoogleApps {
       $url .= $this->_scope . '/';
     }
     $url .= ($op == 'delete' ? 'base' : 'full');
-    $url .= ($op == 'update' || $op == 'delete' ? '/'.CRM_Utils_Array::value('google_contact_id', $params) : '');
+    if ($op == 'update' || $op == 'delete') {
+      if ($google_contact_id == null) {
+        throw new Exception('google_contact_id should be known for an update/delete operation');
+      }
+      $url .= '/'.$google_contact_id;
+    }
 
     // Create Query object
     $query = new Zend_Gdata_Query( $url );
@@ -243,7 +269,7 @@ class CRM_Sync_BAO_GoogleApps {
         $result = $this->_handle->getFeed($query);
         break;
       case 'create':
-        $xml = $this->_objectXML($object, $params);
+        $xml = $this->_objectXML($object, $contact);
         if ($result = $this->_handle->insertEntry($xml, $query->getQueryUrl())) {
           // Extract Google Contact Id & save in CiviCRM
           preg_match('/(.*)\/(.*)/', $result->id, $matches);
@@ -252,17 +278,17 @@ class CRM_Sync_BAO_GoogleApps {
 INSERT INTO `{$this->_custom_group['table_name']}`
   (entity_id,{$this->_custom_fields['google_id']['column_name']},{$this->_custom_fields['last_sync']['column_name']})
 VALUES
-  ($params[civicrm_contact_id],'$matches[2]','$now')";
+  ($contact_id,'$matches[2]','$now')";
           CRM_Core_DAO::executeQuery($query);
         }
         break;
       case 'update':
-        $xml = $this->_objectXML($object, $params);
+        $xml = $this->_objectXML($object, $contact);
         if ($result = $this->_handle->updateEntry($xml, $query->getQueryUrl())) {
           $query = "
 UPDATE `{$this->_custom_group['table_name']}`
    SET {$this->_custom_fields['last_sync']['column_name']} = '$now'
- WHERE {$this->_custom_fields['google_id']['column_name']} = '$params[google_contact_id]'";
+ WHERE {$this->_custom_fields['google_id']['column_name']} = '$google_contact_id'";
           CRM_Core_DAO::executeQuery($query);
         }
         break;
@@ -270,7 +296,7 @@ UPDATE `{$this->_custom_group['table_name']}`
         if ($result = $this->_handle->delete($query->getQueryUrl())) {
           $query = "
 DELETE FROM `{$this->_custom_group['table_name']}`
- WHERE entity_id = $params[civicrm_contact_id]";
+ WHERE entity_id = $contact_id";
           CRM_Core_DAO::executeQuery($query);
         }
         break;
@@ -305,7 +331,7 @@ DELETE FROM `{$this->_custom_group['table_name']}`
 
     // add link back to CiviCRM
     $link = $doc->createElement('gContact:website');
-    $link->setAttribute('href', CIVICRM_UF_BASEURL.'index.php?q=civicrm/contact/view&reset=1&cid='.$contact['civicrm_contact_id']);
+    $link->setAttribute('href', CIVICRM_UF_BASEURL.'index.php?q=civicrm/contact/view&reset=1&cid='.$contact['contact_id']);
     $link->setAttribute('rel' ,'profile');
     $entry->appendChild($link);
     // add name element
@@ -319,12 +345,12 @@ DELETE FROM `{$this->_custom_group['table_name']}`
         }
     }
     // add organization element
-    if ($contact['organization'] || $contact['job_title']) {
+    if ($contact['current_employer'] || $contact['job_title']) {
       $org = $doc->createElement('gd:organization');
       $org->setAttribute('rel' ,'http://schemas.google.com/g/2005#work');
       $entry->appendChild($org);
-      if ($contact['organization']) {
-        $orgName = $doc->createElement('gd:orgName', $contact['organization']);
+      if ($contact['current_employer']) {
+        $orgName = $doc->createElement('gd:orgName', $contact['current_employer']);
         $org->appendChild($orgName);
       }
       if ($contact['job_title']) {
@@ -332,49 +358,56 @@ DELETE FROM `{$this->_custom_group['table_name']}`
         $org->appendChild($orgTitle);
       }
     }
-    // add email element
-    if ($contact['email']) {
-      $email = $doc->createElement('gd:email');
-      if ($contact['email_location_id'] == 1)
-        $type = 'home';
-      else if ($contact['email_location_id'] == 2)
-        $type = 'work';
-      else
-        $type = 'other';
-      $email->setAttribute('rel' ,'http://schemas.google.com/g/2005#'.$type);
-      if ($contact['email_is_primary']) {
-        $email->setAttribute('primary' ,'true');
-      }
-      $email->setAttribute('address' , $contact['email']);
-      $entry->appendChild($email);
+    
+    $params = array(
+        'version' => 3,
+        'contact_id' => $contact['id']
+    );
+    $emailResult = civicrm_api('Email', 'get', $params);
+    foreach($emailResult['values'] as $index => $contactEmail) {
+        $email = $doc->createElement('gd:email');
+        if ($contactEmail['location_type_id'] == 1)
+          $type = 'home';
+        else if ($contactEmail['location_type_id'] == 2)
+          $type = 'work';
+        else
+          $type = 'other';
+        $email->setAttribute('rel' ,'http://schemas.google.com/g/2005#'.$type);
+        if ($contactEmail['is_primary']) {
+          $email->setAttribute('primary' ,'true');
+        }
+        $email->setAttribute('address' , $contactEmail['email']);
+        $entry->appendChild($email);
     }
-    // add telephone element
-    if ($contact['phone']) {
-      $tel = $doc->createElement('gd:phoneNumber', $contact['phone'].($contact['phone_ext']?' x'.$contact['phone_ext']:''));
+    
+    $phoneResult = civicrm_api('Phone', 'get', $params);
+    foreach($phoneResult['values'] as $index => $contactPhone) {
+      // add telephone element
+      $tel = $doc->createElement('gd:phoneNumber', $contactPhone['phone'].($contactPhone['phone_ext']?' x'.$contactPhone['phone_ext']:''));
       // Map CiviCRM type/location values to Google values
       // see https://developers.google.com/gdata/docs/1.0/elements#gdPhoneNumber
       // Google has: home, home_fax, work, work_fax, fax, mobile, pager and other
       // Phone numbers of type 'other' are not pushed to iPhones
       // see http://support.google.com/mail/bin/answer.py?hl=en&answer=139635
-      if ($contact['phone_location_id'] == 1) // home
+      if ($contactPhone['location_type_id'] == 1) // home
         $location = 'home';
-      else if (in_array($contact['phone_location_id'], array(2, 3, 5))) // work, main or billing
+      else if (in_array($contactPhone['location_type_id'], array(2, 3, 5))) // work, main or billing
         $location = 'work';
       else
         $location = 'other';
-      if ($contact['phone_type_id'] == 1) // phone
+      if ($contactPhone['phone_type_id'] == 1) // phone
         $type = $location;
-      elseif ($contact['phone_type_id'] == 2) // mobile
+      elseif ($contactPhone['phone_type_id'] == 2) // mobile
         $type = 'mobile';
-      elseif ($contact['phone_type_id'] == 3) // fax
+      elseif ($contactPhone['phone_type_id'] == 3) // fax
         $type = ($location == 'other' ? 'fax' : $location . '_fax');
-      elseif ($contact['phone_type_id'] == 4) // pager
+      elseif ($contactPhone['phone_type_id'] == 4) // pager
         $type = 'pager';
       else
         $type = 'other';
 
       $tel->setAttribute('rel' ,'http://schemas.google.com/g/2005#'.$type);
-      if ($contact['phone_is_primary']) {
+      if ($contactPhone['is_primary']) {
         $tel->setAttribute('primary' ,'true');
       }
       $entry->appendChild($tel);

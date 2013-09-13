@@ -1,4 +1,4 @@
-# Cividesk sync for Google Apps
+# CiviCRM sync for Google Apps
 
 This CiviCRM extension syncs the contacts in CiviCRM with the Contacts Directory in Google Apps.
 

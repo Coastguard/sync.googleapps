@@ -31,101 +31,144 @@ function civicrm_api3_job_googleapps_sync($params) {
   $custom_group = CRM_Sync_BAO_GoogleApps::get_customGroup();
   $custom_fields = CRM_Sync_BAO_GoogleApps::get_customFields($custom_group['id']);
   $settings = CRM_Sync_BAO_GoogleApps::getSettings();
-
-  /**
-   * Add all recently modified contacts to the sync queue
-   */
+  if (!isset($settings['group'])) {
+    return civicrm_api3_create_error(ts('No sync group configured'));
+  }
+  $sync_group_id=$settings['group'];
+  
+  try {
+    /*
+     * As we are relying on the civicrm_group_contact_cache table to indicate group membership
+     * based on smart groups we need to ensure that the smart group cache is refreshed before
+     * executing. Otherwise there seems to be a condition where the cache is empty (resulting in
+     * deletes) depending on the cache timeout value and the "Rebuild Smart Group Cache" job.
+     */
+    CRM_Contact_BAO_GroupContactCache::loadAll($sync_group_id);
+  } catch (Exception $e) {
+    return civicrm_api3_create_error(ts('Unable to refresh smart group before sync') . ": " . $e->getMessage());
+  }
+   
   // Get the last sync from the system preferences
   $last_sync = CRM_Utils_Array::value('last_sync', $settings, '2000-01-01 00:00:00');
-  // And launch the query ... starting from civicrm_log table since this is where we'll have the least records to look at
-  $query = "
-      INSERT INTO " . CRM_Sync_BAO_GoogleApps::GOOGLEAPPS_QUEUE_TABLE_NAME . "
-        (civicrm_contact_id, google_contact_id, first_name, last_name, organization, job_title, email, email_location_id, email_is_primary, phone, phone_ext, phone_type_id, phone_location_id, phone_is_primary, is_deleted)
-        SELECT
-            contact_a.id, custom_gapps." . $custom_fields['google_id']['column_name'] . ",
-            contact_a.first_name, contact_a.last_name,
-            contact_b.organization_name, contact_a.job_title,
-            email.email, email.location_type_id as email_location_type_id, email.is_primary as email_is_primary,
-            phone.phone, phone.phone_ext, phone.phone_type_id, phone.location_type_id as phone_location_type_id, phone.is_primary as phone_is_primary,
-            contact_a.is_deleted
-        FROM civicrm_log log
-            INNER JOIN civicrm_contact contact_a ON log.entity_id=contact_a.id
-            LEFT JOIN civicrm_relationship rel ON rel.contact_id_a = contact_a.id AND rel.relationship_type_id = 4 AND rel.is_active = 1
-            LEFT JOIN civicrm_contact contact_b ON contact_b.id = rel.contact_id_b
-            LEFT JOIN civicrm_email email ON email.contact_id=contact_a.id AND email.is_primary=1
-            LEFT JOIN civicrm_phone phone ON phone.contact_id=contact_a.id AND phone.is_primary=1
-            LEFT JOIN " . $custom_group['table_name'] . " custom_gapps ON custom_gapps.entity_id=contact_a.id
-        WHERE
-            log.entity_table = 'civicrm_contact' AND log.modified_date > \"" . $last_sync ."\"
-            AND contact_a.contact_type = 'Individual'
-        GROUP BY
-            contact_a.id";
-  CRM_Core_DAO::executeQuery( $query );
-  // TODO: catch errors
-  CRM_Sync_BAO_GoogleApps::setSetting(date('Y-m-d H:m:s'), 'last_sync');
 
-  /**
-   *  Take the next batch from the sync queue and perform sync
-   */
-  $max_processed = CRM_Utils_Array::value('max_processed', $params, 50);
-  $query = "SELECT * FROM `" . CRM_Sync_BAO_GoogleApps::GOOGLEAPPS_QUEUE_TABLE_NAME . "` LIMIT $max_processed";
-  $dao = CRM_Core_DAO::executeQuery( $query );
-  $connected = false;
+  $gapps = new CRM_Sync_BAO_GoogleApps($settings['oauth_email'], $settings['oauth_key'], $settings['oauth_secret']);
+  $gapps->setScope($settings['domain']);
+  
+  $max_processed = CRM_Utils_Array::value('max_processed', $params, 25);
   $result = array('created'=>0, 'updated'=>0, 'deleted'=>0, 'processed'=>0); // holds summary of actions performed
+  
+  /*****************************
+   * Member of group, not yet synced = CREATE
+   *****************************/
+  $addedNotSyncedQuery = "
+      SELECT
+        contact.id
+      FROM civicrm_contact contact
+        LEFT JOIN " . $custom_group['table_name'] . " custom_gapps ON custom_gapps.entity_id=contact.id
+        LEFT JOIN civicrm_group_contact_cache g ON contact.id = g.contact_id
+      WHERE contact.is_deleted = 0
+        AND contact.contact_type = 'Individual'
+        AND g.group_id = %1
+        AND custom_gapps." . $custom_fields['google_id']['column_name'] . " IS NULL
+      LIMIT %2
+  ";
+  $addedNotSyncedParams = array(
+      1 => array( $sync_group_id, 'Integer' ),
+      2 => array( $max_processed, 'Integer' )
+  );
+  
+  $dao = CRM_Core_DAO::executeQuery( $addedNotSyncedQuery, $addedNotSyncedParams );
+
   try {
     while ( $dao->fetch( ) ) {
-      // Connect to Google only if there is at least one item to sync
-      if (!$connected) {
-        $gapps = new CRM_Sync_BAO_GoogleApps($settings['oauth_email'], $settings['oauth_key'], $settings['oauth_secret']);
-        $gapps->setScope($settings['domain']);
-        $connected = true;
-      }
       $row = $dao->toArray();
-      $success = false;
-      if (!$row['is_deleted']) {
-        // Contact needs to be created or updated in Google
-        if (empty($row['google_contact_id'])) { // create contact in Google
-          $success = $gapps->call('contact', 'create', $row );
-          if ($success) {
-            $query = "
-UPDATE ".CRM_Sync_BAO_GoogleApps::GOOGLEAPPS_QUEUE_TABLE_NAME."
-   SET google_contact_id = '$success'
- WHERE civicrm_contact_id = $row[civicrm_contact_id]";
-            CRM_Core_DAO::executeQuery($query);
-            $result['created']++;
-          }
-        } else {                                // update contact in Google
-          $success = $gapps->call('contact', 'update', $row );
-          $result['updated']++;
-        }
-      } else {                                    // delete contact in Google
-        if ($row['google_contact_id']) {
-          $success = $gapps->call('contact', 'delete', $row );
-          if ($success) {
-            // Update other entries for same the contact in the queue
-            $query = "
-UPDATE ".CRM_Sync_BAO_GoogleApps::GOOGLEAPPS_QUEUE_TABLE_NAME."
-   SET google_contact_id = NULL
- WHERE civicrm_contact_id = $row[civicrm_contact_id]";
-            CRM_Core_DAO::executeQuery($query);
-            $result['deleted']++;
-          }
-        } else // nothing to do as the contact was deleted before being sync'ed to Google
-          $success = true;
-      }
+      $success = $gapps->call('contact', 'create', $row['id'] );
       if ($success) {
-        // Delete from queue
-        $query = "
-DELETE FROM ".CRM_Sync_BAO_GoogleApps::GOOGLEAPPS_QUEUE_TABLE_NAME."
- WHERE id='$row[id]'";
-        CRM_Core_DAO::executeQuery($query);
-        $result['processed']++;
+        $result['created']++;
       }
+      
+      $result['processed']++;
     }
   } catch (Exception $e) {
-    return civicrm_api3_create_error(ts('Google API error - either the extension is not fully configured or there is a database mismatch.'));
+    return civicrm_api3_create_error(ts('Google API error: ') . $e->getMessage());
   }
+  
+  /*****************************
+   * Member of group, synced, modified = UPDATE
+   *****************************/
+  $addedSyncedModifiedQuery = "
+      SELECT
+        contact.id
+      FROM civicrm_contact contact
+        LEFT JOIN " . $custom_group['table_name'] . " custom_gapps ON custom_gapps.entity_id=contact.id
+        LEFT JOIN (
+          SELECT * FROM (
+            SELECT * FROM civicrm_log
+            WHERE entity_table = 'civicrm_contact'
+            ORDER BY modified_date desc
+          ) AS t1
+          GROUP BY entity_id
+        ) AS log ON contact.id = log.entity_id
+      WHERE contact.is_deleted = 0
+        AND custom_gapps." . $custom_fields['google_id']['column_name'] . " IS NOT NULL
+        AND custom_gapps." . $custom_fields['last_sync']['column_name'] . " < log.modified_date
+      LIMIT %1
+  ";
+  $addedSyncedModifiedParams = array(
+      1 => array( $max_processed - $result['processed'], 'Integer' )
+  );
+  
+  $dao = CRM_Core_DAO::executeQuery( $addedSyncedModifiedQuery, $addedSyncedModifiedParams );
 
+  try {
+    while ( $dao->fetch( ) ) {
+      $row = $dao->toArray();
+      $success = $gapps->call('contact', 'update', $row['id'] );
+      if ($success) {
+        $result['updated']++;
+      }
+      
+      $result['processed']++;
+    }
+  } catch (Exception $e) {
+    return civicrm_api3_create_error(ts('Google API error: ') . $e->getMessage());
+  }
+  
+  /*****************************
+   * Not in group or deleted, synced = DELETE
+  *****************************/
+  $removedSyncedQuery = "
+      SELECT
+        contact.id
+      FROM civicrm_contact contact
+        LEFT JOIN " . $custom_group['table_name'] . " custom_gapps ON custom_gapps.entity_id=contact.id
+        LEFT JOIN civicrm_group_contact_cache g ON contact.id = g.contact_id AND g.group_id = %1
+      WHERE custom_gapps." . $custom_fields['google_id']['column_name'] . " IS NOT NULL
+        AND (contact.is_deleted = 1 OR g.group_id IS NULL)
+      GROUP BY contact.id
+      LIMIT %2
+  ";
+  
+  $removedSyncedParams = array(
+      1 => array( $sync_group_id, 'Integer' ),
+      2 => array( $max_processed - $result['processed'], 'Integer' )
+  );
+  $dao = CRM_Core_DAO::executeQuery( $removedSyncedQuery, $removedSyncedParams );
+
+  try {
+    while ( $dao->fetch( ) ) {
+      $row = $dao->toArray();
+      $success = $gapps->call('contact', 'delete', $row['id'] );
+      if ($success) {
+        $result['deleted']++;
+      }
+  
+      $result['processed']++;
+    }
+  } catch (Exception $e) {
+    return civicrm_api3_create_error(ts('Google API error: ') . $e->getMessage());
+  }
+  
   // all done, create summary
   if (empty($result['processed'])) {
     $messages = "Nothing needed to be synchronized.";
@@ -136,5 +179,8 @@ DELETE FROM ".CRM_Sync_BAO_GoogleApps::GOOGLEAPPS_QUEUE_TABLE_NAME."
     $settings['processed'] += $result['processed'];
     CRM_Sync_BAO_GoogleApps::setSetting($settings['processed'], 'processed');
   }
+  
+  CRM_Sync_BAO_GoogleApps::setSetting(date('Y-m-d H:m:s'), 'last_sync');
+  
   return civicrm_api3_create_success( $messages );
 }

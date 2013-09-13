@@ -63,25 +63,47 @@ class CRM_Admin_Form_Setting_GoogleApps extends CRM_Admin_Form_Setting {
         $this->_values['oauth_secret'],
         true);
     }
-    if (!$this->_values['registered']) {
-      $element =& $this->add('checkbox',
-        'register',
-        ts('Register with Cividesk'));
-    }
-    $element =& $this->add('text',
-      'subscribed',
-      ts('Send updates to'));
-    $this->addRule('subscribed', ts('Please enter a valid email address.'), 'email');
 
+    // query for all active groups
+    $params = array(
+        'version' => 3,
+        'is_active' => 1,
+        'is_hidden' => 0
+    );
+    $result = civicrm_api('Group', 'get', $params);
+    
+    // build up a list of select options
+    $options = array('' => '- Select Group -');
+    foreach ($result['values'] as $group) {
+      if ($group['saved_search_id']) {
+        $options[$group['id']] = $group['title'];
+      }
+    }
+    
+    $element =& $this->add('select',
+        'group',
+        ts('CiviCRM smart group to sync'),
+        $options
+    );
+    
     $this->assign('oauth_ok', $this->_oauth_ok);
-    $this->assign('registered', $this->_values['registered']);
+    $this->assign('group', $this->_values['group']);
     if ($this->_scheduledJob) {
       $job = $this->_scheduledJob->toArray();
       $job['log_url'] = CRM_Utils_System::url('civicrm/admin/joblog', "jid=$job[id]&reset=1");
-      $query = "SELECT COUNT(*) FROM ".CRM_Sync_BAO_GoogleApps::GOOGLEAPPS_QUEUE_TABLE_NAME;
-      $job['remaining'] = CRM_Core_DAO::singleValueQuery($query);
       $job['last_sync'] = $this->_values['last_sync'];
       $job['processed'] = $this->_values['processed'];
+      
+      $custom_group = CRM_Sync_BAO_GoogleApps::get_customGroup();
+      $custom_fields = CRM_Sync_BAO_GoogleApps::get_customFields($custom_group);
+      $query = "
+          SELECT
+            COUNT(*)
+          FROM civicrm_contact contact
+            LEFT JOIN " . $custom_group['table_name'] . " custom_gapps ON custom_gapps.entity_id=contact.id
+          WHERE custom_gapps." . $custom_fields['google_id']['column_name'] . " IS NOT NULL";
+      $job['synced'] = CRM_Core_DAO::singleValueQuery($query);
+      
       $this->assign('job', $job);
     }
 
@@ -100,7 +122,6 @@ class CRM_Admin_Form_Setting_GoogleApps extends CRM_Admin_Form_Setting {
 
   function setDefaultValues() {
     $defaults = $this->_values;
-    $defaults['register'] = true;
     return $defaults;
   }
 
@@ -115,6 +136,10 @@ class CRM_Admin_Form_Setting_GoogleApps extends CRM_Admin_Form_Setting {
     if ($valid && (!$this->_oauth_ok) && (!$this->_checkOAuth($this->_submitValues))) {
       $valid = false;
       CRM_Core_Session::setStatus(ts('Cannot authenticate to this Google Apps domain. Check OAuth parameters.'));
+    }
+    if ($valid && empty($this->_submitValues['group'])) {
+      $valid = false;
+      CRM_Core_Session::setStatus(ts('You must choose a CiviCRM group to synchronize to Google Apps.'));
     }
     return $valid;
   }
@@ -138,40 +163,13 @@ class CRM_Admin_Form_Setting_GoogleApps extends CRM_Admin_Form_Setting {
       foreach(array('domain', 'oauth_email', 'oauth_key', 'oauth_secret') as $setting) {
         CRM_Sync_BAO_GoogleApps::setSetting($params[$setting], $setting);
       }
-      // Rebuild menus (for the Google shortcuts)
-      CRM_Core_Invoke::rebuildMenuAndCaches(TRUE);
-      CRM_Core_Session::setStatus(ts("The 'More' menu has been added for your convenience."));
       // And perform the first run ...
       $params = array('version' => 3);
       $result = civicrm_api('job', 'googleapps_sync', $params);
     }
 
-    // Check registration
-    if ($params['register']) {
-      $result = CRM_Core_Cividesk::register("GoogleApps sync");
-      if (CRM_Utils_Array::value('success', $result)) {
-        CRM_Sync_BAO_GoogleApps::setSetting(true, 'registered');
-        CRM_Core_Session::setStatus(ts('Thank you for registering with Cividesk.'));
-      } else {
-        CRM_Core_Session::setStatus(ts('Sorry, there was an error when registering. Please retry later.'));
-      }
-    }
-    // Check emailing
-    if ($params['subscribed'] != $this->_values['subscribed']) {
-      if ($params['subscribed']) {
-        $result = CRM_Core_Cividesk::subscribe("GoogleApps sync", $params['subscribed']);
-        if (CRM_Utils_Array::value('success', $result)) {
-          CRM_Core_Session::setStatus(
-            ts("We will send '%1' email updates related to this extension.",
-              array(1 => $params['subscribed']))
-          );
-        } else {
-          $params['subscribed'] = '';
-          CRM_Core_Session::setStatus(ts('Sorry, there was an error when subscribing. Please retry later.'));
-        }
-      }
-      CRM_Sync_BAO_GoogleApps::setSetting($params['subscribed'], 'subscribed');
-    }
+    // store the CiviCRM group id to sync
+    CRM_Sync_BAO_GoogleApps::setSetting($params['group'], 'group');
   } //end of function
 
   private function _checkOAuth($params) {

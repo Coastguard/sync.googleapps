@@ -95,7 +95,7 @@ class CRM_Admin_Form_Setting_GoogleApps extends CRM_Admin_Form_Setting {
       $job['processed'] = $this->_values['processed'];
       
       $custom_group = CRM_Sync_BAO_GoogleApps::get_customGroup();
-      $custom_fields = CRM_Sync_BAO_GoogleApps::get_customFields($custom_group);
+      $custom_fields = CRM_Sync_BAO_GoogleApps::get_customFields($custom_group['id']);
       $query = "
           SELECT
             COUNT(*)
